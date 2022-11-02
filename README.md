@@ -96,3 +96,7 @@ Extension Manager depends on the following libraries:
  - libadwaita
  - [blueprint](https://gitlab.gnome.org/jwestman/blueprint-compiler)
  - [text-engine](https://github.com/mjakeman/text-engine/)
+ 
+## 👫 Code of Conduct
+This project follows the [GNOME Code of Conduct](https://wiki.gnome.org/Foundation/CodeOfConduct). Please
+adhere to it in all project spaces and interactions.
