@@ -24,6 +24,7 @@
 #include "exm-zoom-picture.h"
 #include "exm-comment-tile.h"
 #include "exm-comment-dialog.h"
+#include "exm-unified-data.h"
 
 #include "web/exm-data-provider.h"
 #include "web/exm-image-resolver.h"
@@ -70,6 +71,10 @@ struct _ExmDetailView
     GtkButton *show_more_btn;
 	AdwBin *image_overlay;
 	ExmZoomPicture *overlay_screenshot;
+
+    GtkBox *section_comments;
+    GtkBox *section_versions;
+    GtkListBox *section_links;
 
     AdwActionRow *link_extensions;
     gchar *uri_extensions;
@@ -223,7 +228,7 @@ queue_resolve_comments (ExmDetailView *self,
                         GCancellable  *cancellable)
 {
     gtk_stack_set_visible_child_name (self->comment_stack, "page_spinner");
-    exm_comment_provider_get_comments_async (self->comment_provider, pk, false, cancellable,
+    exm_comment_provider_get_comments_async (self->comment_provider, pk, FALSE, cancellable,
                                              (GAsyncReadyCallback) on_get_comments,
                                              self);
 }
@@ -259,91 +264,101 @@ install_remote (GtkButton     *button,
                                 "(sb)", self->uuid, warn);
 }
 
-static void
-on_data_loaded (GObject      *source,
-                GAsyncResult *result,
-                gpointer      user_data)
+static ExmInstallButtonState
+get_install_state (ExmUnifiedData *data,
+                   ExmDetailView  *self)
 {
-    ExmSearchResult *data;
-    GError *error = NULL;
-    ExmDetailView *self;
-    ExmInstallButtonState install_state;
-    GtkWidget *child;
-    GList *version_iter;
+    const char *uuid = exm_unified_data_get_uuid (data);
+    gboolean is_installed = exm_manager_is_installed_uuid (self->manager, uuid);
+
+    if (is_installed)
+        return EXM_INSTALL_BUTTON_STATE_INSTALLED;
+
     ExmShellVersionMap *version_map;
-    gchar *uri;
+    version_map = exm_unified_data_get_shell_version_map (data);
 
-    self = EXM_DETAIL_VIEW (user_data);
+    g_return_val_if_fail (version_map != NULL, EXM_INSTALL_BUTTON_STATE_UNSUPPORTED);
 
-    if ((data = exm_data_provider_get_finish (EXM_DATA_PROVIDER (source), result, &error)) != FALSE)
+    return exm_shell_version_map_supports (version_map, self->shell_version)
+        ? EXM_INSTALL_BUTTON_STATE_DEFAULT
+        : EXM_INSTALL_BUTTON_STATE_UNSUPPORTED;
+}
+
+static void
+populate_with_data (ExmUnifiedData *data,
+                    ExmDetailView  *self)
+{
+    ExmInstallButtonState install_state;
+
+    const char *name = exm_unified_data_get_name (data);
+    adw_window_title_set_title (self->title, name);
+    gtk_label_set_label (self->ext_title, name);
+
+    const char *uuid = exm_unified_data_get_uuid (data);
+    adw_window_title_set_subtitle (self->title, uuid);
+
+    const char *creator = exm_unified_data_get_creator (data);
+    gtk_label_set_label (self->ext_author, creator);
+
+    const char *description = exm_unified_data_get_description (data);
+    gtk_label_set_label (self->ext_description, description);
+
+    if (self->resolver_cancel)
     {
-        gint pk;
-        gboolean is_installed, is_supported;
-        gchar *uuid, *name, *creator, *icon_uri, *screenshot_uri, *link, *description;
-        g_object_get (data,
-                      "uuid", &uuid,
-                      "name", &name,
-                      "creator", &creator,
-                      "icon", &icon_uri,
-                      "screenshot", &screenshot_uri,
-                      "link", &link,
-                      "description", &description,
-                      "shell_version_map", &version_map,
-                      "pk", &pk,
-                      NULL);
+        g_cancellable_cancel (self->resolver_cancel);
+        g_clear_object (&self->resolver_cancel);
+    }
 
-        adw_window_title_set_title (self->title, name);
-        adw_window_title_set_subtitle (self->title, uuid);
+    char *screenshot_uri;
+    if (exm_unified_data_get_screenshot_uri (data, &screenshot_uri) && screenshot_uri != NULL)
+    {
+        self->resolver_cancel = g_cancellable_new ();
 
-        is_installed = exm_manager_is_installed_uuid (self->manager, uuid);
-        is_supported = exm_search_result_supports_shell_version (data, self->shell_version);
+        exm_screenshot_set_paintable (self->ext_screenshot, NULL);
+		exm_zoom_picture_set_paintable (self->overlay_screenshot, NULL);
+        exm_screenshot_reset (self->ext_screenshot);
 
-        gtk_label_set_label (self->ext_title, name);
-        gtk_label_set_label (self->ext_author, creator);
-        gtk_label_set_label (self->ext_description, description);
+		gtk_widget_set_visible (GTK_WIDGET (self->ext_screenshot_container), TRUE);
+		gtk_widget_set_visible (GTK_WIDGET (self->ext_screenshot_popout_button), FALSE);
 
-        if (self->resolver_cancel)
-        {
-            g_cancellable_cancel (self->resolver_cancel);
-            g_clear_object (&self->resolver_cancel);
-        }
+        queue_resolve_screenshot (self, screenshot_uri, self->resolver_cancel);
 
-        if (screenshot_uri != NULL)
-        {
-            self->resolver_cancel = g_cancellable_new ();
+        g_free (screenshot_uri);
+    }
+    else
+    {
+        gtk_widget_set_visible (GTK_WIDGET (self->ext_screenshot_container), FALSE);
+    }
 
-            exm_screenshot_set_paintable (self->ext_screenshot, NULL);
-			exm_zoom_picture_set_paintable (self->overlay_screenshot, NULL);
-            exm_screenshot_reset (self->ext_screenshot);
+    install_state = get_install_state (data, self);
+    g_object_set (self->ext_install, "state", install_state, NULL);
 
-			gtk_widget_set_visible (GTK_WIDGET (self->ext_screenshot_container), TRUE);
-			gtk_widget_set_visible (GTK_WIDGET (self->ext_screenshot_popout_button), FALSE);
-
-            queue_resolve_screenshot (self, screenshot_uri, self->resolver_cancel);
-        }
-        else
-        {
-            gtk_widget_set_visible (GTK_WIDGET (self->ext_screenshot_container), FALSE);
-        }
-
-        install_state = is_installed
-            ? EXM_INSTALL_BUTTON_STATE_INSTALLED
-            : (is_supported
-               ? EXM_INSTALL_BUTTON_STATE_DEFAULT
-               : EXM_INSTALL_BUTTON_STATE_UNSUPPORTED);
-
-        g_object_set (self->ext_install, "state", install_state, NULL);
-
+    char *link;
+    if (exm_unified_data_get_link (data, &link))
+    {
         self->uri_extensions = g_uri_resolve_relative ("https://extensions.gnome.org/",
-                                                       link,
-                                                       G_URI_FLAGS_NONE,
-                                                       NULL);
+                                                   link,
+                                                   G_URI_FLAGS_NONE,
+                                                   NULL);
 
         adw_action_row_set_subtitle (self->link_extensions, self->uri_extensions);
+        gtk_widget_set_visible (GTK_WIDGET (self->section_links), TRUE);
+    }
+    else
+    {
+        gtk_widget_set_visible (GTK_WIDGET (self->section_links), FALSE);
+    }
 
-        // Clear Flowbox
-        while ((child = gtk_widget_get_first_child (GTK_WIDGET (self->supported_versions))))
-            gtk_flow_box_remove (self->supported_versions, child);
+    // Clear Flowbox
+    GtkWidget *child;
+    while ((child = gtk_widget_get_first_child (GTK_WIDGET (self->supported_versions))))
+        gtk_flow_box_remove (self->supported_versions, child);
+
+    ExmShellVersionMap *version_map = exm_unified_data_get_shell_version_map (data);
+
+    if (version_map)
+    {
+        GList *version_iter;
 
         for (version_iter = version_map->map;
              version_iter != NULL;
@@ -367,29 +382,75 @@ on_data_loaded (GObject      *source,
             g_free (version);
         }
 
+        gtk_widget_set_visible (GTK_WIDGET (self->section_versions), TRUE);
+    }
+    else
+    {
+        gtk_widget_set_visible (GTK_WIDGET (self->section_versions), FALSE);
+    }
+
+    if (self->signal_id > 0)
+        g_signal_handler_disconnect (self->show_more_btn, self->signal_id);
+
+    int pk;
+    if (exm_unified_data_get_pk (data, &pk))
+    {
         self->pk = pk;
-
-        if (self->signal_id > 0)
-            g_signal_handler_disconnect (self->show_more_btn, self->signal_id);
-
         self->signal_id = g_signal_connect (self->show_more_btn,
-                                            "clicked",
-                                            G_CALLBACK (show_more_comments),
-                                            self);
+                                        "clicked",
+                                        G_CALLBACK (show_more_comments),
+                                        self);
 
         queue_resolve_comments (self, pk, self->resolver_cancel);
 
-        // Reset scroll position
-        gtk_adjustment_set_value (gtk_scrolled_window_get_vadjustment (self->scroll_area), 0);
+        gtk_widget_set_visible (GTK_WIDGET (self->section_comments), TRUE);
+    }
+    else
+    {
+        gtk_widget_set_visible (GTK_WIDGET (self->section_comments), FALSE);
+    }
 
-        gtk_stack_set_visible_child_name (self->stack, "page_detail");
+    // Reset scroll position
+    gtk_adjustment_set_value (gtk_scrolled_window_get_vadjustment (self->scroll_area), 0);
 
+    gtk_stack_set_visible_child_name (self->stack, "page_detail");
+}
+
+static void
+on_data_loaded (GObject      *source,
+                GAsyncResult *async_result,
+                gpointer      user_data)
+{
+    ExmUnifiedData *data;
+    ExmSearchResult *web_info;
+    ExmExtension *local_info;
+
+    GError *error = NULL;
+    ExmDetailView *self;
+
+    g_return_if_fail (EXM_IS_DETAIL_VIEW (user_data));
+
+    self = EXM_DETAIL_VIEW (user_data);
+
+    data = exm_unified_data_new ();
+
+    // Build Unified Data Representation
+    if ((local_info = exm_manager_get_by_uuid (self->manager, self->uuid)))
+        exm_unified_data_set_local_data (data, local_info);
+
+    if ((web_info = exm_data_provider_get_finish (EXM_DATA_PROVIDER (source), async_result, &error)) != FALSE)
+        exm_unified_data_set_web_data (data, web_info);
+
+    // We need at least some data to proceed
+    if (!exm_unified_data_is_empty (data)) {
+        populate_with_data (data, self);
         return;
     }
 
     adw_window_title_set_title (self->title, _("An Error Occurred"));
     adw_window_title_set_subtitle (self->title, NULL);
     gtk_stack_set_visible_child_name (self->stack, "page_error");
+    return;
 }
 
 void
@@ -537,6 +598,10 @@ exm_detail_view_class_init (ExmDetailViewClass *klass)
     gtk_widget_class_bind_template_child (widget_class, ExmDetailView, show_more_btn);
 	gtk_widget_class_bind_template_child (widget_class, ExmDetailView, image_overlay);
 	gtk_widget_class_bind_template_child (widget_class, ExmDetailView, overlay_screenshot);
+
+    gtk_widget_class_bind_template_child (widget_class, ExmDetailView, section_comments);
+    gtk_widget_class_bind_template_child (widget_class, ExmDetailView, section_versions);
+    gtk_widget_class_bind_template_child (widget_class, ExmDetailView, section_links);
 
     gtk_widget_class_install_action (widget_class, "detail.open-extensions", NULL, open_link);
     gtk_widget_class_install_action (widget_class, "detail.open-homepage", NULL, open_link);
