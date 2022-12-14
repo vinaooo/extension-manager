@@ -391,3 +391,4 @@ exm_extension_row_init (ExmExtensionRow *self)
         adw_action_row_set_subtitle_lines (ADW_ACTION_ROW (action_row), 1);
     }
 }
+
